@@ -5,6 +5,8 @@
  License, v2.0. If a copy of the MPL was not distributed with this
  file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+ modified Simon.G.Andrews Nov 2022 for issue #153
+  added Terminal support for handling color text display with ANSI escape sequences
  ------------------------------------------------------------------
   VT100 terminal window
  ------------------------------------------------------------------
@@ -30,16 +32,19 @@
   after a delay. */
   var imageTimeout = null;
 
-  // Text to be displayed in the terminal
+  // Text to be displayed in the terminal as array holding lines of text
   var termText = [ "" ];
+  var termCursorX = 0;
+  var termCursorY = 0;
+  
   // Map of terminal line number to text to display before it
   var termExtraText = {};
+
   // List of (jquerified) DOM elements for each line
   var elements = [];
 
-  var termCursorX = 0;
-  var termCursorY = 0;
-  var termControlChars = [];
+  // current control character sequence as string
+  var termControlChars = '';
 
   // maximum lines on the terminal
   var MAX_LINES = 2048;
@@ -371,7 +376,7 @@
     termExtraText = {};
     // leave X cursor where it was...
     termCursorY -= currentLine.line; // move Y cursor back
-    termControlChars = [];
+    termControlChars = '';
     // finally update the HTML
     updateTerminal();
     // fire off a clear terminal processor
@@ -423,7 +428,7 @@
     var t = [];
     for (var y in termText) {
       var line = termText[y];
-      if (y == termCursorY) {
+      if (y == termCursorY) {  // current line 
         var ch = Espruino.Core.Utils.getSubString(line,termCursorX,1);
         line = Espruino.Core.Utils.escapeHTML(
             Espruino.Core.Utils.getSubString(line,0,termCursorX)) +
@@ -442,6 +447,9 @@
         if (imageTimeout) clearTimeout(imageTimeout);
         imageTimeout = setTimeout(convertInlineImages, 1000);
       }
+
+      // convert to HTML spans any text with colour attribute terminal codes left in the text by handleReceivedCharacter()
+      line = terminalCodesToHtml(line);
 
       // extra text is for stuff like tutorials
       if (termExtraText[y])
@@ -480,84 +488,184 @@
     return str.substr(0,s+1);
   }
 
-  var handleReceivedCharacter = function (/*char*/ch) {
-    // SGA Version for issue #154
-    //console.log("IN = "+ch);
-    if (termControlChars.length==0) {
-      switch (ch) {
-        case  8 : {
-          if (termCursorX>0) termCursorX--;
-        } break;
-        case 10 : { // line feed
-          Espruino.callProcessor("terminalNewLine", termText[termCursorY]);
-          termCursorX = 0; termCursorY++;
-          while (termCursorY >= termText.length) termText.push("");
-        } break;
-        case 13 : { // carriage return
-          termCursorX = 0;
-        } break;
-        case 27 : {
-          termControlChars = [ 27 ];
-        } break;
-        case 19 : break; // XOFF
-        case 17 : break; // XON
-        case 0xC2 : break; // UTF8 for <255 - ignore this
-        default : {
-          // Else actually add character
-          if (termText[termCursorY]===undefined) termText[termCursorY]="";
-          termText[termCursorY] = trimRight(
-              Espruino.Core.Utils.getSubString(termText[termCursorY],0,termCursorX) +
-              String.fromCharCode(ch) +
-              Espruino.Core.Utils.getSubString(termText[termCursorY],termCursorX+1));
-          termCursorX++;
-          // check for the 'prompt', eg '>' or 'debug>'
-          // if we have it, send a 'terminalPrompt' message
-          if (ch == ">".charCodeAt(0)) {
-            var prompt = termText[termCursorY];
-            if (prompt==">" || prompt=="debug>")
-              Espruino.callProcessor("terminalPrompt", prompt);
-          }
-        }
-      }
-   } else if (termControlChars[0]==27) { // Esc
-     if (termControlChars[1]==91) { // Esc [
-       if (termControlChars[2]==63) {
-         if (termControlChars[3]==55) {
-           if (ch!=108)
-             console.log("Expected 27, 91, 63, 55, 108 - no line overflow sequence");
-           termControlChars = [];
-         } else {
-           if (ch==55) {
-             termControlChars = [27, 91, 63, 55];
-           } else termControlChars = [];
-         }
-       } else {
-         termControlChars = [];
-         switch (ch) {
-           case 63: termControlChars = [27, 91, 63]; break;
-           case 65: if (termCursorY > 0) termCursorY--; break; // up  FIXME should add extra lines in...
-           case 66: termCursorY++; while (termCursorY >= termText.length) termText.push(""); break;  // down FIXME should add extra lines in...
-           case 67: termCursorX++; break; // right
-           case 68: if (termCursorX > 0) termCursorX--; break; // left
-           case 74: termText[termCursorY] = termText[termCursorY].substr(0,termCursorX); // Delete to right + down
-                    termText = termText.slice(0,termCursorY+1);
-                    break;
-           case 75: termText[termCursorY] = termText[termCursorY].substr(0,termCursorX); break; // Delete to right
-         }
-       }
-     } else {
-       switch (ch) {
-         case 91: {
-           termControlChars = [27, 91];
-         } break;
-         default: {
-           termControlChars = [];
-         }
-       }
-     }
-   } else termControlChars = [];
-};
+    // Add Character string  (str) to termText for output
+    var addCharacters = function (str){
+    if (termText[termCursorY]===undefined) termText[termCursorY]="";
+    termText[termCursorY] = trimRight(
+        Espruino.Core.Utils.getSubString(termText[termCursorY],0,termCursorX) +
+        str +
+        Espruino.Core.Utils.getSubString(termText[termCursorY],termCursorX+1));
+    termCursorX = termCursorX+str.length;
+    // check for the 'prompt', eg '>' or 'debug>'
+    // if we have it, send a 'terminalPrompt' message
+   // if (str == ">".charCodeAt(0)) {
+    if (str == ">" ) {
+      var prompt = termText[termCursorY];
+      if (prompt==">" || prompt=="debug>")
+        Espruino.callProcessor("terminalPrompt", prompt);
+    }
+  }
 
+  var handleReceivedCharacter = function (/*char*/ch) {
+    switch (termControlChars.length) {
+      case 0 : {
+        switch (ch) {
+          case  8 : // BS
+            if (termCursorX>0) termCursorX--;
+            break;
+          case 10 : // line feed
+            Espruino.callProcessor("terminalNewLine", termText[termCursorY]);
+            termCursorX = 0; termCursorY++;
+            while (termCursorY >= termText.length) termText.push("");
+            break;
+          case 13 : // carriage return
+            termCursorX = 0;
+            break;
+          case 27 : // Esc
+          termControlChars = String.fromCharCode(27);
+            break;
+          case 19 : break; // XOFF
+          case 17 : break; // XON
+          case 0xC2 : break; // UTF8 for <255 - ignore this
+          default : addCharacters(String.fromCharCode(ch));  // Else actually add character
+        }
+        break;
+      }
+      case 1 : 
+      if (termControlChars == '\x1B')  // Esc 
+          switch (ch) {
+            case 91: termControlChars += '['; break; // Esc [
+            default: termControlChars = '';
+        } else termControlChars = '';
+        break;
+      case 2 : 
+      if (termControlChars == '\x1B[') { // Esc [ 
+          switch (ch) {
+            case 48: termControlChars += '0'; break; // Esc [ 0
+            case 51: termControlChars += '3'; break; // Esc [ 3
+            case 52: termControlChars += '4'; break; // Esc [ 4
+            case 63: termControlChars += '?'; break; // Esc [ ?
+            case 65: // up  
+              if (termCursorY > 0) termCursorY--; 
+              termControlChars = '';
+              break; // old FIXME should add extra lines in...
+            case 66: // down 
+              termCursorY++; 
+              while (termCursorY >= termText.length) termText.push(""); 
+              termControlChars = '';
+              break; // old FIXME should add extra lines in...
+            case 67: //right
+              termCursorX++;
+              termControlChars = ''; 
+              break; 
+            case 68: // left
+              if (termCursorX > 0) termCursorX--;
+              termControlChars = ''; 
+              break; 
+            case 74: // Delete to right + down
+              termText[termCursorY] = termText[termCursorY].substr(0,termCursorX); 
+              termText = termText.slice(0,termCursorY+1);
+              termControlChars = ''; 
+              break;
+            case 75: // K Delete to right
+              termText[termCursorY] = termText[termCursorY].substr(0,termCursorX);
+              termControlChars = '';
+              break;
+            default:
+              termControlChars = '';
+            }
+       } else termControlChars = '';
+       break;
+      case 3 :
+        termControlChars += String.fromCharCode(ch); 
+        if (/\x1B\[0m/.test(termControlChars)) {  //colour device attribute reset
+          addCharacters(termControlChars);        //add to input for terminalCodesToHtml()
+          termControlChars = ''; 
+          break;  
+        }
+        if (/\x1B\[[3-4][0-7]/.test(termControlChars)) break;  // colour device attribute 
+        if (/\x1B\[?7/.test(termControlChars))         break;  // Esc [ ? 7      
+        termControlChars = '';  
+        break;  
+      case 4 :
+        termControlChars += String.fromCharCode(ch);  
+        if (/\x1B\[\?7/.test(termControlChars)) { // Esc [ ? 7  
+          if (ch!=108) {                          // Esc [ ? 7 l
+            console.log("Expected 27, 91, 63, 55, 108 - no line overflow sequence");
+          }
+          termControlChars = '';  // got Esc [ ? 7 l  or not - reset term control chars 
+          break;
+        }
+        if (/\x1B\[[3-4][0-7]m/.test(termControlChars)) {  //Setting display colour attribute
+          addCharacters(termControlChars);                 //add to input for terminalCodesToHtml()
+          termControlChars = '';
+          break;
+        }
+      default: termControlChars = [];
+    }
+  }
+
+/**
+ * @function terminalCodesToHtml() is used under MIT license with thanks to
+ * @license 'Copyright (c) 2021 Oliver Steele - see https://github.com/osteele/terminal-codes-to-html' 
+ * @param {*} str an input string to search for ansi/VT100 colour terminal codes which set display colour attributes
+ * @returns a string with properly formed HTML spans where the control strings are found. eg <span style = color: nnn>  
+ * recognises: - esc [ 0 - Reset / Normal - all attributes off  
+ *             - esc [ 30–37 - Set foreground color 
+ *             - esc [ 40–47 - Set background color
+ * not supported are: multiple ';' delimited codes within a control string or rgb strings for codes 38/48
+ */
+function terminalCodesToHtml(str) {
+  const escapeCodeColors = [
+    "black",
+    "red",
+    "green",
+    "yellow",
+    "blue",
+    "magenta",
+    "cyan",
+    "white",
+  ];
+
+  function color(code) {
+    if (code >= 8) return null;
+    return escapeCodeColors[code];
+  }
+
+  let output = "";
+  const stack = [];
+  const state = {
+    color: null,
+    background: null,
+  };
+  // eslint-disable-next-line no-control-regex
+  for (const f of str.split(/(\x1b\[\d*m)/)) {
+    if (f.startsWith("\x1b")) {
+      const code = parseInt(f.slice(2), 10) || 0;
+      if (code === 0) {
+        state.color = null;
+        state.background = null;
+      } else if (30 <= code && code <= 39) {
+        state.color = color(code - 30);
+      } else if (40 <= code && code <= 49) {
+        state.background = color(code - 40);
+      }
+      while (stack.length > 0) output += stack.pop();
+      const style = Object.entries(state)
+        .filter(([_k, v]) => v)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join(";");
+      if (style) {
+        output += `<span style="${style}">`;
+        stack.push("</span>");
+      }
+    } else {
+      output += f
+    }
+  }
+  while (stack.length > 0) output += stack.pop();
+  return output;
+}
 
 // ----------------------------------------------------------------------------------------------------------
 // ----------------------------------------------------------------------------------------------------------
