@@ -5,6 +5,7 @@
  License, v2.0. If a copy of the MPL was not distributed with this
  file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+ modified Simon.G.Andrews Nov 2022 for supporting ANSI terminal attribute  Issue #154
  ------------------------------------------------------------------
   VT100 terminal window
  ------------------------------------------------------------------
@@ -30,20 +31,83 @@
   after a delay. */
   var imageTimeout = null;
 
-  // Text to be displayed in the terminal
+  // Text to be displayed in the terminal as array holding lines of text
   var termText = [ "" ];
+  var termCursorX = 0;
+  var termCursorY = 0;
+
   // Map of terminal line number to text to display before it
   var termExtraText = {};
+  
   // List of (jquerified) DOM elements for each line
   var elements = [];
 
-  var termCursorX = 0;
-  var termCursorY = 0;
-  var termControlChars = [];
+  // current control character sequence as string
+  var termControlChars = '';
 
   // maximum lines on the terminal
   var MAX_LINES = 2048;
 
+  /* Display Attributes of each termText line as array of array of objects.
+     Set during recievedCharacter() processing.  Object properties: 
+      pos: int - character position of style on termtext line
+      type: int - type of attribute. Corresponding to attribute ID in attributes
+      value: string - parameter (depending on type) eg reset,on,off,colour - see setActiveStyles(obj)
+  */
+  var termAttribute = [];
+
+  // mapping of display attribute type/ID to HTML in line style - in response to ANSI Seq - esc [ ... 
+  const attributes = [                                                  
+    {ID:0,name:'resetAll',styleStr:''},                                    //  0m resets all
+    {ID:1,name:'foregroud',styleStr:'color:'},         //styleStr+colour  30->37m set, 39m clear 
+    {ID:2,name:'bold',styleStr:'font-weight:'},        //styleStr+'bolder'     1m set, 22m clear 
+ // {ID:2,name:'faint',styleStr:'font-weight:'},         styleStr+'lighter'    2m set, 22m clear 
+    {ID:3,name:'italic',styleStr:'font-style:italic'},                     //  3m set, 23m clear  
+    {ID:4,name:'underline',styleStr:'text-decoration:underline'},          //  4m set, 24m clear 
+    {ID:5,name:'crossedOut',styleStr:'text-decoration:line-through'},      //  9m set, 29m clear 
+    {ID:6,name:'background',styleStr:'background-color:'} //style+colour  40->47 set, 49 clear 
+  ]
+
+  // maintain current state mapping for handleReceivedCharacter()
+  var currentState = 'start';
+
+  // maintain buffer of attribute objects for currrent control char sequence 
+  // enables handling delimited multiple display attributes using bufferAttrib() & sendAttrib()
+  var attribBuffer = [];
+
+  /* Styles currently active for HTML creation. As array:
+     index = ID-1 of corresponding attribute in attributes[]  
+     value (string) = undefined || complete style string (as per attributes[]) inc colour/font weight value
+  */
+  var activeStyles = [];
+
+  // updates active style for a passed termAttribute object
+  function setActiveStyles(obj) {
+    switch (obj.value) {
+      case "reset": {
+        activeStyles = [];
+        break;
+      }
+      case "on": {
+        activeStyles[obj.type - 1] = attributes[obj.type].styleStr;
+        break;
+      }
+      case "off": {
+        activeStyles[obj.type - 1] = undefined;
+        break;
+      }
+      default: {
+        activeStyles[obj.type - 1] = attributes[obj.type].styleStr + obj.value;
+        break;
+      }
+    }
+  }
+
+// TODO const fullModalAttribs = true; //set true then any active attribute styles carry to new lines
+
+  // map of ANSI display attribute colours for code 0->7,  index = code
+  const colorMap = ["black","red","green","yellow","blue","magenta","cyan","white"];
+  
   function init()
   {
     // Add stuff we need
@@ -329,7 +393,8 @@
   };
 
   /* check for any terminal-inline-image and if they are still BMP
-  then convert them to PNG using canvas */
+  then convert them to PNG using canvas 
+  */
   function convertInlineImages() {
     imageTimeout = null;
     var images = document.getElementsByClassName("terminal-inline-image");
@@ -353,7 +418,7 @@
       })(images[i]);
   }
 
-  /// send the given characters as if they were typed
+  // send the given characters as if they were typed
   var typeCharacters = function(s) {
     onInputData(s);
   }
@@ -368,14 +433,46 @@
     for (var l in termText)
       termText[l] = (l==0?">":":") + termText[l];
     // reset other stuff...
+    termAttribute = [];
     termExtraText = {};
     // leave X cursor where it was...
     termCursorY -= currentLine.line; // move Y cursor back
-    termControlChars = [];
+    termControlChars = '';
     // finally update the HTML
     updateTerminal();
     // fire off a clear terminal processor
     Espruino.callProcessor("terminalClear");
+  };
+
+  /*
+   function buildAttribSpans 
+   returns {string} updated line with HTML spans created to style as per corresponding line attributes 
+                    with text elements in line Escaped via Utils.escapeHTML()
+   param {string} line - line form termText[]
+   param {array of objects} attribs - line attributes as defined in termAttribute[] for the line of text 
+   TODO - support full modal or not effect of attributes
+  */
+  var buildAttribSpans = function (line, attribs) {
+  // if no attributes for line use any active styles 
+  if (!attribs && !activeStyles) return ( Espruino.Core.Utils.escapeHTML(line) );
+  if (!attribs) return ( "<span style=" + activeStyles.join(";") + ">" + Espruino.Core.Utils.escapeHTML(line) + "</span>" );
+
+    // this reduce produces a sequence of HTML spans, one span for each of the attrib objects in the line
+    // consumes all the text for the line uinsg the pos's in the attrib.
+    var result = attribs.reduce(function (acc, obj, i, arr) {
+      setActiveStyles(obj);  // styles from attributes are acumulating in activeStyles until cleared
+      let end = !arr[i + 1] ? line.length : arr[i + 1].pos;
+      if (end == obj.pos) return acc; // no text just styles
+      return (
+        acc +
+        "<span style=" +
+        activeStyles.join(";") +
+        ">" +
+        Espruino.Core.Utils.escapeHTML(line.slice(obj.pos, end)) +
+        "</span>"
+      );
+    }, Espruino.Core.Utils.escapeHTML(line.slice(0, attribs[0].pos)));  // initial value is any text before first attribute position
+    return result;
   };
 
   var updateTerminal = function() {
@@ -394,6 +491,7 @@
     if (termText.length > MAX_LINES) {
       var removedLines = termText.length - MAX_LINES;
       termText = termText.slice(removedLines);
+      termAttribute = termAttribute.slice(removedLines);
       termCursorY -= removedLines;
       var newTermExtraText = {};
       for (var i in termExtraText) {
@@ -421,16 +519,16 @@
         elements[i].remove();
     // now write this to the screen
     var t = [];
-    for (var y in termText) {
+    for (var y in termText) {   
       var line = termText[y];
-      if (y == termCursorY) {
+      if (y == termCursorY) {  // current line 
         var ch = Espruino.Core.Utils.getSubString(line,termCursorX,1);
-        line = Espruino.Core.Utils.escapeHTML(
-            Espruino.Core.Utils.getSubString(line,0,termCursorX)) +
-            "<span class='terminal__cursor'>" + Espruino.Core.Utils.escapeHTML(ch) + "</span>" +
-            Espruino.Core.Utils.escapeHTML(Espruino.Core.Utils.getSubString(line,termCursorX+1));
+        line = 
+          buildAttribSpans(Espruino.Core.Utils.getSubString(line,0,termCursorX)) + 
+          "<span class='terminal__cursor'>" + Espruino.Core.Utils.escapeHTML(ch) + "</span>" +
+          buildAttribSpans(Espruino.Core.Utils.getSubString(line,termCursorX+1))     
       } else {
-        line = Espruino.Core.Utils.escapeHTML(line);
+        line = buildAttribSpans(line,termAttribute[y]);
         // handle URLs
         line = line.replace(/(https?:\/\/[-a-zA-Z0-9@:%._\+~#=\/\?]+)/g, '<a href="$1" target="_blank">$1</a>');
       }
@@ -457,6 +555,9 @@
       } else if (elements[y].html()!=line)
         elements[y].html(line);
     }
+    // finished updating lines so reset current Styles
+    activeStyles = [];
+
     // now show the line where the cursor is
     if (elements[termCursorY]!==undefined) {
       terminal[0].scrollTop = elements[termCursorY][0].offsetTop;
@@ -480,84 +581,207 @@
     return str.substr(0,s+1);
   }
 
-  var handleReceivedCharacter = function (/*char*/ch) {
-    // SGA Version for issue #154
-    //console.log("IN = "+ch);
-    if (termControlChars.length==0) {
-      switch (ch) {
-        case  8 : {
-          if (termCursorX>0) termCursorX--;
-        } break;
-        case 10 : { // line feed
-          Espruino.callProcessor("terminalNewLine", termText[termCursorY]);
-          termCursorX = 0; termCursorY++;
-          while (termCursorY >= termText.length) termText.push("");
-        } break;
-        case 13 : { // carriage return
-          termCursorX = 0;
-        } break;
-        case 27 : {
-          termControlChars = [ 27 ];
-        } break;
-        case 19 : break; // XOFF
-        case 17 : break; // XON
-        case 0xC2 : break; // UTF8 for <255 - ignore this
-        default : {
-          // Else actually add character
-          if (termText[termCursorY]===undefined) termText[termCursorY]="";
-          termText[termCursorY] = trimRight(
-              Espruino.Core.Utils.getSubString(termText[termCursorY],0,termCursorX) +
-              String.fromCharCode(ch) +
-              Espruino.Core.Utils.getSubString(termText[termCursorY],termCursorX+1));
-          termCursorX++;
-          // check for the 'prompt', eg '>' or 'debug>'
-          // if we have it, send a 'terminalPrompt' message
-          if (ch == ">".charCodeAt(0)) {
-            var prompt = termText[termCursorY];
-            if (prompt==">" || prompt=="debug>")
-              Espruino.callProcessor("terminalPrompt", prompt);
-          }
+  /* Recieved Characters State Maps **
+      Nextstate is chosen for the FIRST match of current state (state) and match of the recieved character (inChrs).
+      If inChrs is RegExp then regex match is used otherwise charaacter equivalent is tested.
+      ccReset()is executed when no match found.
+      Action function is executed when a match, where typeof action is function.
+    
+    ccStateMapStart - shortend list when in state start - Execute addCharacters() when no match found.
+    ccStateMapCChars - other states to hanfle control characters - Execute ccReset() when no match found.
+
+    all characters recieved in the current control sequence are in string termControlChars.
+  */
+  var ccStateMapStart =[
+    {state:'start',inChrs:'\x1B',nextState:'wait@ESC',action:'' },               // escape
+    {state:'start',inChrs:'\x08',nextState:'start',action:() => cursorLeft() },  // backspace
+    {state:'start',inChrs:'\x0A',nextState:'start',action:() => cursorLF() },    // line feed
+    {state:'start',inChrs:'\x0D',nextState:'start',action:() => cursorCR() },    // Carrage return
+    {state:'start',inChrs:/[\x11\x13\xC2]/,nextState:'start',action: () => ccReset() }         // ignore: xon, xoff, UTF8 for <255 
+  ]
+
+  var ccStateMapCChars =[
+    {state:'wait@ESC',inChrs:'[',nextState:'wait@CSI',action: '' },
+
+    {state:'wait@CSI',inChrs:'A',nextState:'start',action: () => cursorUp() },
+    {state:'wait@CSI',inChrs:'B',nextState:'start',action: () => cursorDown() },
+    {state:'wait@CSI',inChrs:'C',nextState:'start',action: () => cursorRight() },
+    {state:'wait@CSI',inChrs:'D',nextState:'start',action: () => cursorLeft() },
+    {state:'wait@CSI',inChrs:'J',nextState:'start',action: () => delEndOfScreen() },
+    {state:'wait@CSI',inChrs:'K',nextState:'start',action: () => delEndOfLine() },
+  
+    {state:'wait@CSI',inChrs:'m',nextState:'start',action: () => saveAttrib({type:0,value:'reset'})},  // m after CSI (no params) - reset all attribs
+    {state:'wait@CSI',inChrs:'0',nextState:'wait@CSI_0',action:''},
+    {state:'wait@CSI',inChrs:'1',nextState:'wait@CSI_1',action:''},
+    {state:'wait@CSI',inChrs:'2',nextState:'wait@CSI_2',action:''},
+    {state:'wait@CSI',inChrs:'3',nextState:'wait@CSI_3',action:''},
+    {state:'wait@CSI',inChrs:'4',nextState:'wait@CSI_4',action:''},
+    {state:'wait@CSI',inChrs:'9',nextState:'wait@CSI_9',action:''},
+    {state:'wait@CSI',inChrs:'?',nextState:'wait@Custom',action:''},
+
+    {state:'wait@CSI_0',inChrs:'m',nextState:'start',action: () => saveAttrib({type:0,value:'reset'})},  
+    {state:'wait@CSI_0',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:0,value:'reset'})}, 
+    {state:'wait@CSI_1',inChrs:'m',nextState:'start',action: () => saveAttrib({type:2,value:'bolder'})},
+    {state:'wait@CSI_1',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:2,value:'bolder'})},
+    {state:'wait@CSI_2',inChrs:'m',nextState:'start',action: () => saveAttrib({type:2,value:'lighter'})},
+    {state:'wait@CSI_2',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:2,value:'lighter'})},
+    {state:'wait@CSI_2',inChrs:/[234]/,nextState:'wait@Clear',action:''},
+    {state:'wait@CSI_2',inChrs:'9',nextState:'wait@ClearStrikeOut',action:''},
+
+    {state:'wait@CSI_3',inChrs:/[1-7]/,nextState:'wait@FColor',action:''},
+    {state:'wait@CSI_3',inChrs:'m',nextState:'start',action: () => saveAttrib({type:3,value:'on'})},
+    {state:'wait@CSI_3',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:3,value:'on'})},
+    {state:'wait@CSI_4',inChrs:/[1-7]/,nextState:'wait@BColor',action:''},
+    {state:'wait@CSI_4',inChrs:'m',nextState:'start',action: () => saveAttrib({type:4,value: 'on'})},
+    {state:'wait@CSI_4',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:4,value: 'on'})},
+    {state:'wait@CSI_9',inChrs:'m',nextState:'start',action: () => saveAttrib({type:5,value: 'on'})},
+    {state:'wait@CSI_9',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:5,value: 'on'})},
+    {state:'wait@Clear',inChrs:'m',nextState:'start',action: () => saveAttrib({type:+termControlChars.slice(-2,-1),value: 'off'})},
+    {state:'wait@Clear',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:+termControlChars.slice(-2,-1),value: 'off'})},
+    {state:'wait@ClearStrikeOut',inChrs:'m',nextState:'start',action: () => saveAttrib({type:5,value: 'off'})},
+    {state:'wait@ClearStrikeOut',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:5,value: 'off'})},
+    {state:'wait@FColor',inChrs:'m',nextState:'start',action: () => saveAttrib({type:1,value:colorMap[termControlChars.slice(-2,-1)]})},
+    {state:'wait@FColor',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:1,value:colorMap[termControlChars.slice(-2,-1)]})},
+    {state:'wait@BColor',inChrs:'m',nextState:'start',action: () => saveAttrib({type:6,value:colorMap[termControlChars.slice(-2,-1)]})},
+    {state:'wait@BColor',inChrs:';',nextState:'wait@Delim',action: ( )=> bufferAttrib({type:6,value:colorMap[termControlChars.slice(-2,-1)]})},
+    {state:'wait@Delim',inChrs:'0',nextState:'wait@CSI_0',action:''},
+    {state:'wait@Delim',inChrs:'1',nextState:'wait@CSI_1',action:''},
+    {state:'wait@Delim',inChrs:'2',nextState:'wait@CSI_2',action:''},
+    {state:'wait@Delim',inChrs:'3',nextState:'wait@CSI_3',action:''},
+    {state:'wait@Delim',inChrs:'4',nextState:'wait@CSI_4',action:''},
+    {state:'wait@Delim',inChrs:'9',nextState:'wait@CSI_9',action:''},
+    {state:'wait@Delim',inChrs:'m',nextState:'start',action: () => saveAttrib({type:0,value:'reset'})},   // m without param - assume 0 and reset all
+    {state:'wait@Delim',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:0,value:'reset'})}, // null betweeen delims - reset all attribs
+  
+    {state:'wait@Custom',inChrs:'7',nextState:'wait@Custom_7',action:''},
+    {state:'wait@Custom_7',inChrs:'l',nextState:'start',action: () => ccReset()},
+    {state:'wait@Custom_7',inChrs:/^l/,nextState:'start',action: () => {console.log("Expected 27, 91, 63, 55, 108 - no line overflow sequence");ccReset()}},
+  ]
+
+  // action functions used in statemaps 
+  function cursorLeft() {
+    if (termCursorX > 0) termCursorX--;
+    ccReset();
+  };
+
+  function cursorRight() {
+    termCursorX++;
+    ccReset();
+  };
+
+  function cursorUp() {
+    if (termCursorY > 0) termCursorY--; 
+    ccReset();
+  };
+
+  function cursorDown() {
+    termCursorY++; 
+    while (termCursorY >= termText.length) termText.push(""); 
+    ccReset();
+  };
+
+  function cursorLF() {            
+    Espruino.callProcessor("terminalNewLine", termText[termCursorY]);
+    termCursorX = 0; termCursorY++;
+    while (termCursorY >= termText.length) termText.push("");
+    ccReset();
+  }
+
+  function cursorCR() {
+    termCursorX = 0;
+    ccReset();
+  };
+
+  function delEndOfScreen() {
+    termText[termCursorY] = termText[termCursorY].substr(0,termCursorX); 
+    termText = termText.slice(0,termCursorY+1);
+    ccReset();
+  }
+
+  function delEndOfLine() {
+    termText[termCursorY] = termText[termCursorY].substr(0,termCursorX);
+    ccReset();
+  }
+
+  function bufferAttrib(obj) {
+    // add attribute obj to attribBuffer
+    obj.pos = termCursorX;
+    attribBuffer = !attribBuffer ? [].concat(obj): attribBuffer.concat(obj);
+  };
+
+  function saveAttrib(obj) {
+    // add attribute obj to attribBuffer and commit buffer to attributes for line 
+    obj.pos = termCursorX;
+    attribBuffer = !attribBuffer ? [].concat(obj): attribBuffer.concat(obj);
+    termAttribute[termCursorY] = attribBuffer;
+    ccReset();
+  };
+
+  function ccReset(){
+  // reset current escape sequence processing
+    termControlChars = '';
+    attribBuffer = [];
+  }
+
+  // Add Character string  (str) to termText for output
+  function addCharacters(str){
+    if (termText[termCursorY]===undefined) { 
+      termText[termCursorY]="";
+    }
+    termText[termCursorY] = trimRight(
+        Espruino.Core.Utils.getSubString(termText[termCursorY],0,termCursorX) +
+        str +
+        Espruino.Core.Utils.getSubString(termText[termCursorY],termCursorX+1));
+    termCursorX = termCursorX+str.length;
+    // check for the 'prompt', eg '>' or 'debug>'
+    // if we have it, send a 'terminalPrompt' message
+   // if (str == ">".charCodeAt(0)) {
+    if (str == ">" ) {
+      var prompt = termText[termCursorY];
+      if (prompt==">" || prompt=="debug>")
+        Espruino.callProcessor("terminalPrompt", prompt);
+    }
+  }
+
+  var handleReceivedCharacter = function (cCode) {
+    var ch = String.fromCharCode(cCode);
+    var newState = {};
+  //  console.log('** got char > ' +ch);
+    termControlChars += ch; // add recieved characters - cleared with ccReset()
+  
+    // use statemaps to identify any actions to take on input character from a given state
+    if (currentState == 'start'){  // search the shorter statemap
+      newState = ccStateMapStart.find(
+      (states) =>
+        states.state === 'start' &&
+        (states.inChrs instanceof RegExp
+          ? states.inChrs.test(ch)
+          : states.inChrs === ch)
+      );
+      if (!newState) addCharacters(ch) // no specific mapping so add character to terminal 
+      else {
+        currentState = newState.nextState;
+        if (typeof newState.action === 'function') newState.action(); // actions reset state if req'd
+      }
+    } else{ // search full control character state map
+      newState = ccStateMapCChars.find( 
+        (states) =>
+          states.state === currentState &&
+          (states.inChrs instanceof RegExp
+            ? states.inChrs.test(ch)
+            : states.inChrs === ch)
+        );
+        if (!newState){ // back to start state when no match found
+          currentState = 'start';
+          ccReset();
+        }
+        else {
+          currentState = newState.nextState;
+          if (typeof newState.action === 'function') newState.action();
         }
       }
-   } else if (termControlChars[0]==27) { // Esc
-     if (termControlChars[1]==91) { // Esc [
-       if (termControlChars[2]==63) {
-         if (termControlChars[3]==55) {
-           if (ch!=108)
-             console.log("Expected 27, 91, 63, 55, 108 - no line overflow sequence");
-           termControlChars = [];
-         } else {
-           if (ch==55) {
-             termControlChars = [27, 91, 63, 55];
-           } else termControlChars = [];
-         }
-       } else {
-         termControlChars = [];
-         switch (ch) {
-           case 63: termControlChars = [27, 91, 63]; break;
-           case 65: if (termCursorY > 0) termCursorY--; break; // up  FIXME should add extra lines in...
-           case 66: termCursorY++; while (termCursorY >= termText.length) termText.push(""); break;  // down FIXME should add extra lines in...
-           case 67: termCursorX++; break; // right
-           case 68: if (termCursorX > 0) termCursorX--; break; // left
-           case 74: termText[termCursorY] = termText[termCursorY].substr(0,termCursorX); // Delete to right + down
-                    termText = termText.slice(0,termCursorY+1);
-                    break;
-           case 75: termText[termCursorY] = termText[termCursorY].substr(0,termCursorX); break; // Delete to right
-         }
-       }
-     } else {
-       switch (ch) {
-         case 91: {
-           termControlChars = [27, 91];
-         } break;
-         default: {
-           termControlChars = [];
-         }
-       }
-     }
-   } else termControlChars = [];
-};
-
+    console.log ('** new state > ' + currentState);
+  }
 
 // ----------------------------------------------------------------------------------------------------------
 // ----------------------------------------------------------------------------------------------------------
