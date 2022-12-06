@@ -1,5 +1,5 @@
 Espruino Tools
-==============
+===============
 
 This repository contains a set of tools for the [Espruino JavaScript Interpreter](http://www.espruino.com).
 
