@@ -450,29 +450,33 @@
                     with text elements in line Escaped via Utils.escapeHTML()
    param {string} line - line form termText[]
    param {array of objects} attribs - line attributes as defined in termAttribute[] for the line of text 
-   TODO - support full modal or not effect of attributes
   */
   var buildAttribSpans = function (line, attribs) {
   // if no attributes for line use any active styles 
   if (!attribs && !activeStyles) return ( Espruino.Core.Utils.escapeHTML(line) );
   if (!attribs) return ( "<span style=" + activeStyles.join(";") + ">" + Espruino.Core.Utils.escapeHTML(line) + "</span>" );
 
-    // this reduce produces a sequence of HTML spans, one span for each of the attrib objects in the line
-    // consumes all the text for the line uinsg the pos's in the attrib.
-    var result = attribs.reduce(function (acc, obj, i, arr) {
-      setActiveStyles(obj);  // styles from attributes are acumulating in activeStyles until cleared
-      let end = !arr[i + 1] ? line.length : arr[i + 1].pos;
-      if (end == obj.pos) return acc; // no text just styles
-      return (
-        acc +
-        "<span style=" +
-        activeStyles.join(";") +
-        ">" +
-        Espruino.Core.Utils.escapeHTML(line.slice(obj.pos, end)) +
-        "</span>"
-      );
-    }, Espruino.Core.Utils.escapeHTML(line.slice(0, attribs[0].pos)));  // initial value is any text before first attribute position
-    return result;
+  // working a line with attributes and active styles
+  var firstLineSpan =  "<span style=" + activeStyles.join(";") + ">" // applying the active styles to
+  + Espruino.Core.Utils.escapeHTML((line.slice(0, attribs[0].pos)))  // to line up to first attribute 
+  + "</span>" ;
+  
+   // this reduce function returns a sequence of HTML spans, one span for each of the attrib objects in the line
+  // consumes all the text for the line uinsg the pos's in the attrib.
+  var result = attribs.reduce(function (acc, obj, i, arr) {
+    setActiveStyles(obj);  // styles from attributes are acumulating in activeStyles until cleared
+    let end = !arr[i + 1] ? line.length : arr[i + 1].pos;
+    if (end == obj.pos) return acc; // no text just styles
+    return (
+      acc +
+      "<span style=" +
+      activeStyles.join(";") +
+      ">" +
+      Espruino.Core.Utils.escapeHTML(line.slice(obj.pos, end)) +
+      "</span>"
+    );
+  }, firstLineSpan);  // initial value - text before first attribute position
+  return result;
   };
 
   var updateTerminal = function() {
@@ -713,7 +717,7 @@
     // add attribute obj to attribBuffer and commit buffer to attributes for line 
     obj.pos = termCursorX;
     attribBuffer = !attribBuffer ? [].concat(obj): attribBuffer.concat(obj);
-    termAttribute[termCursorY] = attribBuffer;
+    termAttribute[termCursorY] = !termAttribute[termCursorY] ? [].concat(attribBuffer): termAttribute[termCursorY].concat(attribBuffer); 
     ccReset();
   };
 
