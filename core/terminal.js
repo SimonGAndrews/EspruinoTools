@@ -586,81 +586,99 @@
   }
 
   /* Recieved Characters State Maps **
-      Nextstate is chosen for the FIRST match of current state (state) and match of the recieved character (inChrs).
-      If inChrs is RegExp then regex match is used otherwise charaacter equivalent is tested.
-      ccReset()is executed when no match found.
-      Action function is executed when a match, where typeof action is function.
-    
-    ccStateMapStart - shortend list when in state start - Execute addCharacters() when no match found.
-    ccStateMapCChars - other states to hanfle control characters - Execute ccReset() when no match found.
-
-    all characters recieved in the current control sequence are in string termControlChars.
+     Utilised by handleReceivedCharacter()
+     - Nextstate is chosen for the FIRST match of current state (state) and match of the recieved character (inChrs).
+     - If inChrs is RegExp then regex match is used otherwise charaacter equivalent is tested.
+     - Action function is executed when a match, where typeof action is function.
+     - ccReset()is executed when no match found.
+     all characters recieved in the current control sequence are in string termControlChars for action processing.
   */
-  var ccStateMapStart =[
-    {state:'start',inChrs:'\x1B',nextState:'wait@ESC',action:'' },               // escape
-    {state:'start',inChrs:'\x08',nextState:'start',action:() => cursorLeft() },  // backspace
-    {state:'start',inChrs:'\x0A',nextState:'start',action:() => cursorLF() },    // line feed
-    {state:'start',inChrs:'\x0D',nextState:'start',action:() => cursorCR() },    // Carrage return
-    {state:'start',inChrs:/[\x11\x13\xC2]/,nextState:'start',action: () => ccReset() }         // ignore: xon, xoff, UTF8 for <255 
+ var ccStateMap = {
+  'start': [
+    {inChrs:/[ -~]/,nextState:'start',action: () => addCharacters(termControlChars[0]) },    // any printable character
+    {inChrs:'\x1B',nextState:'wait@ESC',action:'' },                      // escape
+    {inChrs:'\x08',nextState:'start',action:() => cursorLeft() },         // backspace
+    {inChrs:'\x0A',nextState:'start',action:() => cursorLF() },           // line feed
+    {inChrs:'\x0D',nextState:'start',action:() => cursorCR() },           // Carrage return
+    {inChrs:/[\x11\x13\xC2]/,nextState:'start',action: () => ccReset() }  // ignore: xon, xoff, UTF8 for <255 
+   ],
+  'wait@ESC': [{inChrs:'[',nextState:'wait@CSI',action: '' }],
+  'wait@CSI': [
+    {inChrs:'A',nextState:'start',action: () => cursorUp() },
+    {inChrs:'B',nextState:'start',action: () => cursorDown() },
+    {inChrs:'C',nextState:'start',action: () => cursorRight() },
+    {inChrs:'D',nextState:'start',action: () => cursorLeft() },
+    {inChrs:'J',nextState:'start',action: () => delEndOfScreen() },
+    {inChrs:'K',nextState:'start',action: () => delEndOfLine() },
+    {inChrs:'m',nextState:'start',action: () => saveAttrib({type:0,value:'reset'})},  // m after CSI (no params) - reset all attribs
+    {inChrs:'0',nextState:'wait@CSI_0',action:''},
+    {inChrs:'1',nextState:'wait@CSI_1',action:''},
+    {inChrs:'2',nextState:'wait@CSI_2',action:''},
+    {inChrs:'3',nextState:'wait@CSI_3',action:''},
+    {inChrs:'4',nextState:'wait@CSI_4',action:''},
+    {inChrs:'9',nextState:'wait@CSI_9',action:''},
+    {inChrs:'?',nextState:'wait@Custom',action:''},
+  ],
+  'wait@CSI_0': [
+    {inChrs:'m',nextState:'start',action: () => saveAttrib({type:0,value:'reset'})},  
+    {inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:0,value:'reset'})}
+  ], 
+  'wait@CSI_1': [
+    {inChrs:'m',nextState:'start',action: () => saveAttrib({type:2,value:'bolder'})},
+    {inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:2,value:'bolder'})}
+  ],
+  'wait@CSI_2': [
+    {inChrs:'m',nextState:'start',action: () => saveAttrib({type:2,value:'lighter'})},
+    {inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:2,value:'lighter'})},
+    {inChrs:/[234]/,nextState:'wait@Clear',action:''},
+    {inChrs:'9',nextState:'wait@ClearStrikeOut',action:''}
+  ],
+  'wait@CSI_3': [
+    {inChrs:/[1-7]/,nextState:'wait@FColor',action:''},
+    {inChrs:'m',nextState:'start',action: () => saveAttrib({type:3,value:'on'})},
+    {inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:3,value:'on'})}
+  ],
+  'wait@CSI_4': [
+    {inChrs:/[1-7]/,nextState:'wait@BColor',action:''},
+    {inChrs:'m',nextState:'start',action: () => saveAttrib({type:4,value: 'on'})},
+    {inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:4,value: 'on'})}
+  ],
+  'wait@CSI_9': [
+    {inChrs:'m',nextState:'start',action: () => saveAttrib({type:5,value: 'on'})},
+    {inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:5,value: 'on'})}
+  ],
+  'wait@Clear': [
+    {inChrs:'m',nextState:'start',action: () => saveAttrib({type:+termControlChars.slice(-2,-1),value: 'off'})},
+    {inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:+termControlChars.slice(-2,-1),value: 'off'})}
+  ],
+  'wait@ClearStrikeOut': [
+    {inChrs:'m',nextState:'start',action: () => saveAttrib({type:5,value: 'off'})},
+    {inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:5,value: 'off'})}
+  ],
+  'wait@FColor': [
+    {inChrs:'m',nextState:'start',action: () => saveAttrib({type:1,value:colorMap[termControlChars.slice(-2,-1)]})},
+    {inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:1,value:colorMap[termControlChars.slice(-2,-1)]})}
+  ],
+  'wait@BColor': [
+    {inChrs:'m',nextState:'start',action: () => saveAttrib({type:6,value:colorMap[termControlChars.slice(-2,-1)]})},
+    {inChrs:';',nextState:'wait@Delim',action: ( )=> bufferAttrib({type:6,value:colorMap[termControlChars.slice(-2,-1)]})}
+  ],
+  'wait@Delim': [
+    {inChrs:'0',nextState:'wait@CSI_0',action:''},
+    {inChrs:'1',nextState:'wait@CSI_1',action:''},
+    {inChrs:'2',nextState:'wait@CSI_2',action:''},
+    {inChrs:'3',nextState:'wait@CSI_3',action:''},
+    {inChrs:'4',nextState:'wait@CSI_4',action:''},
+    {inChrs:'9',nextState:'wait@CSI_9',action:''},
+    {inChrs:'m',nextState:'start',action: () => saveAttrib({type:0,value:'reset'})},   // m without param - assume 0 and reset all
+    {inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:0,value:'reset'})} // null betweeen delims - reset all attribs
+  ],
+  'wait@Custom': [{inChrs:'7',nextState:'wait@Custom_7',action:''}],
+  'wait@Custom_7': [
+    {inChrs:'l',nextState:'start',action: () => ccReset()},
+    {inChrs:/^l/,nextState:'start',action: () => {console.log("Expected 27, 91, 63, 55, 108 - no line overflow sequence");ccReset()}}
   ]
-
-  var ccStateMapCChars =[
-    {state:'wait@ESC',inChrs:'[',nextState:'wait@CSI',action: '' },
-
-    {state:'wait@CSI',inChrs:'A',nextState:'start',action: () => cursorUp() },
-    {state:'wait@CSI',inChrs:'B',nextState:'start',action: () => cursorDown() },
-    {state:'wait@CSI',inChrs:'C',nextState:'start',action: () => cursorRight() },
-    {state:'wait@CSI',inChrs:'D',nextState:'start',action: () => cursorLeft() },
-    {state:'wait@CSI',inChrs:'J',nextState:'start',action: () => delEndOfScreen() },
-    {state:'wait@CSI',inChrs:'K',nextState:'start',action: () => delEndOfLine() },
-  
-    {state:'wait@CSI',inChrs:'m',nextState:'start',action: () => saveAttrib({type:0,value:'reset'})},  // m after CSI (no params) - reset all attribs
-    {state:'wait@CSI',inChrs:'0',nextState:'wait@CSI_0',action:''},
-    {state:'wait@CSI',inChrs:'1',nextState:'wait@CSI_1',action:''},
-    {state:'wait@CSI',inChrs:'2',nextState:'wait@CSI_2',action:''},
-    {state:'wait@CSI',inChrs:'3',nextState:'wait@CSI_3',action:''},
-    {state:'wait@CSI',inChrs:'4',nextState:'wait@CSI_4',action:''},
-    {state:'wait@CSI',inChrs:'9',nextState:'wait@CSI_9',action:''},
-    {state:'wait@CSI',inChrs:'?',nextState:'wait@Custom',action:''},
-
-    {state:'wait@CSI_0',inChrs:'m',nextState:'start',action: () => saveAttrib({type:0,value:'reset'})},  
-    {state:'wait@CSI_0',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:0,value:'reset'})}, 
-    {state:'wait@CSI_1',inChrs:'m',nextState:'start',action: () => saveAttrib({type:2,value:'bolder'})},
-    {state:'wait@CSI_1',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:2,value:'bolder'})},
-    {state:'wait@CSI_2',inChrs:'m',nextState:'start',action: () => saveAttrib({type:2,value:'lighter'})},
-    {state:'wait@CSI_2',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:2,value:'lighter'})},
-    {state:'wait@CSI_2',inChrs:/[234]/,nextState:'wait@Clear',action:''},
-    {state:'wait@CSI_2',inChrs:'9',nextState:'wait@ClearStrikeOut',action:''},
-
-    {state:'wait@CSI_3',inChrs:/[1-7]/,nextState:'wait@FColor',action:''},
-    {state:'wait@CSI_3',inChrs:'m',nextState:'start',action: () => saveAttrib({type:3,value:'on'})},
-    {state:'wait@CSI_3',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:3,value:'on'})},
-    {state:'wait@CSI_4',inChrs:/[1-7]/,nextState:'wait@BColor',action:''},
-    {state:'wait@CSI_4',inChrs:'m',nextState:'start',action: () => saveAttrib({type:4,value: 'on'})},
-    {state:'wait@CSI_4',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:4,value: 'on'})},
-    {state:'wait@CSI_9',inChrs:'m',nextState:'start',action: () => saveAttrib({type:5,value: 'on'})},
-    {state:'wait@CSI_9',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:5,value: 'on'})},
-    {state:'wait@Clear',inChrs:'m',nextState:'start',action: () => saveAttrib({type:+termControlChars.slice(-2,-1),value: 'off'})},
-    {state:'wait@Clear',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:+termControlChars.slice(-2,-1),value: 'off'})},
-    {state:'wait@ClearStrikeOut',inChrs:'m',nextState:'start',action: () => saveAttrib({type:5,value: 'off'})},
-    {state:'wait@ClearStrikeOut',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:5,value: 'off'})},
-    {state:'wait@FColor',inChrs:'m',nextState:'start',action: () => saveAttrib({type:1,value:colorMap[termControlChars.slice(-2,-1)]})},
-    {state:'wait@FColor',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:1,value:colorMap[termControlChars.slice(-2,-1)]})},
-    {state:'wait@BColor',inChrs:'m',nextState:'start',action: () => saveAttrib({type:6,value:colorMap[termControlChars.slice(-2,-1)]})},
-    {state:'wait@BColor',inChrs:';',nextState:'wait@Delim',action: ( )=> bufferAttrib({type:6,value:colorMap[termControlChars.slice(-2,-1)]})},
-    {state:'wait@Delim',inChrs:'0',nextState:'wait@CSI_0',action:''},
-    {state:'wait@Delim',inChrs:'1',nextState:'wait@CSI_1',action:''},
-    {state:'wait@Delim',inChrs:'2',nextState:'wait@CSI_2',action:''},
-    {state:'wait@Delim',inChrs:'3',nextState:'wait@CSI_3',action:''},
-    {state:'wait@Delim',inChrs:'4',nextState:'wait@CSI_4',action:''},
-    {state:'wait@Delim',inChrs:'9',nextState:'wait@CSI_9',action:''},
-    {state:'wait@Delim',inChrs:'m',nextState:'start',action: () => saveAttrib({type:0,value:'reset'})},   // m without param - assume 0 and reset all
-    {state:'wait@Delim',inChrs:';',nextState:'wait@Delim',action: () => bufferAttrib({type:0,value:'reset'})}, // null betweeen delims - reset all attribs
-  
-    {state:'wait@Custom',inChrs:'7',nextState:'wait@Custom_7',action:''},
-    {state:'wait@Custom_7',inChrs:'l',nextState:'start',action: () => ccReset()},
-    {state:'wait@Custom_7',inChrs:/^l/,nextState:'start',action: () => {console.log("Expected 27, 91, 63, 55, 108 - no line overflow sequence");ccReset()}},
-  ]
+}
 
   // action functions used in statemaps 
   function cursorLeft() {
@@ -739,53 +757,38 @@
     termCursorX = termCursorX+str.length;
     // check for the 'prompt', eg '>' or 'debug>'
     // if we have it, send a 'terminalPrompt' message
-   // if (str == ">".charCodeAt(0)) {
     if (str == ">" ) {
       var prompt = termText[termCursorY];
       if (prompt==">" || prompt=="debug>")
         Espruino.callProcessor("terminalPrompt", prompt);
     }
+    ccReset();
   }
 
   var handleReceivedCharacter = function (cCode) {
     var ch = String.fromCharCode(cCode);
     var newState = {};
-  //  console.log('** got char > ' +ch);
+    //  console.log('** got char > ' +ch);
     termControlChars += ch; // add recieved characters - cleared with ccReset()
-  
-    // use statemaps to identify any actions to take on input character from a given state
-    if (currentState == 'start'){  // search the shorter statemap
-      newState = ccStateMapStart.find(
-      (states) =>
-        states.state === 'start' &&
-        (states.inChrs instanceof RegExp
+
+    // use statemaps to identify next state and any actions to take on input character
+    newState =
+      ccStateMap[currentState] &&
+      ccStateMap[currentState].find((states) =>
+        states.inChrs instanceof RegExp
           ? states.inChrs.test(ch)
-          : states.inChrs === ch)
+          : states.inChrs === ch
       );
-      if (!newState) addCharacters(ch) // no specific mapping so add character to terminal 
-      else {
-        currentState = newState.nextState;
-        if (typeof newState.action === 'function') newState.action(); // actions reset state if req'd
-      }
-    } else{ // search full control character state map
-      newState = ccStateMapCChars.find( 
-        (states) =>
-          states.state === currentState &&
-          (states.inChrs instanceof RegExp
-            ? states.inChrs.test(ch)
-            : states.inChrs === ch)
-        );
-        if (!newState){ // back to start state when no match found
-          currentState = 'start';
-          ccReset();
-        }
-        else {
-          currentState = newState.nextState;
-          if (typeof newState.action === 'function') newState.action();
-        }
-      }
-    console.log ('** new state > ' + currentState);
-  }
+    if (!newState) {
+      // back to start state when no match found
+      currentState = "start";
+      ccReset();
+    } else {
+      currentState = newState.nextState;
+      if (typeof newState.action === "function") newState.action();
+    }
+    // console.log("** new state > " + currentState);
+  };
 
 // ----------------------------------------------------------------------------------------------------------
 // ----------------------------------------------------------------------------------------------------------
